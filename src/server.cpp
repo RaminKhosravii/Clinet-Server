@@ -1,174 +1,70 @@
-#include <fstream>
-#include <iostream>
-#include <map>
-#include <string>
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <nlohmann/json.hpp>
+#include <Server.h>
 
-#pragma comment(lib, "ws2_32.lib")
+using json = nlohmann::json;
 
-using json = nlohmann::json; // Alias for nlohmann::json to simplify usage
-
-// Define constants for port and buffer size
-constexpr int PORT = 54000;
-constexpr int BUFFER_SIZE = 1024;
-
-// Structure to represent device status
-struct Device {
-    std::string id;
-    std::string status;
-};
-
-// Map to store device information with device name as the key
-std::map<std::string, Device> deviceRegistry;
-
-// Function to handle incoming JSON requests and generate a JSON response
-json handleRequest(const json& request) {
-    json response;
-
-    const std::string requestType = request.value("request_type", "");
-
-    if (requestType == "connect") {
-        // Handle connection request
-        response["result"] = "success";
-        response["message"] = "Connected to server.";
-    }
-    else if (requestType == "add_device") {
-        // Handle device addition request
-        const std::string deviceName = request.value("name", "");
-        const std::string deviceStatus = request.value("status", "");
-
-        // Add device to the registry
-        deviceRegistry[deviceName] = {deviceName, deviceStatus};
-
-        response["result"] = "success";
-        response["message"] = "Device added.";
-    }
-    else if (requestType == "control_device") {
-        // Handle device control request
-        const std::string deviceName = request.value("name", "");
-        const std::string newStatus = request.value("new_status", "");
-
-        // Check if the device exists in the registry
-        const auto it = deviceRegistry.find(deviceName);
-        if (it != deviceRegistry.end()) {
-            it->second.status = newStatus;
-            response["result"] = "success";
-            response["message"] = "Device status updated.";
-        } else {
-            response["result"] = "error";
-            response["message"] = "Device not found.";
-        }
-    }
-    else if (requestType == "get_devices") {
-        // Handle request for getting device information
-        json devicesJson = json::array();
-
-        // Populate the devices JSON array with each device's information
-        for (const auto& [name, device] : deviceRegistry) {
-            devicesJson.push_back({{"name", device.id}, {"status", device.status}});
-        }
-
-        response["result"] = "success";
-        response["devices"] = devicesJson;
-    }
-    else {
-        response["result"] = "error";
-        response["message"] = "Invalid request.";
+Server::Server(const int port) {
+    server_fd = socket(AF_INET, SOCK_STREAM, 0); // Create socket for server
+    if (server_fd == 0) {
+        perror("Socket failed");
+        exit(EXIT_FAILURE);
     }
 
-    return response;
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) { // Set socket options
+        perror("Set socket options failed");
+        exit(EXIT_FAILURE);
+    }
+
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_port = htons(port);
+
+    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+        perror("Bind failed");
+        exit(EXIT_FAILURE);
+    }
+
+    if (listen(server_fd, 3) < 0) {
+        perror("Listen failed");
+        exit(EXIT_FAILURE);
+    }
+
+    std::cout << "Server started, waiting for connections..." << std::endl;
+    start_Accept(); // Start accepting client connections
 }
 
-// Function to initialize and start the server
-void startServer() {
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        std::cerr << "WSAStartup failed." << std::endl;
-        return;
+void Server::start_Accept() {
+    new_socket = accept(server_fd, reinterpret_cast<struct sockaddr *>(&address), (socklen_t*)&addrlen);
+    if (new_socket < 0) {
+        perror("Accept failed");
+        exit(EXIT_FAILURE);
     }
 
-    // Create a server socket
-    const SOCKET serverSocket = socket(AF_INET, SOCK_STREAM, 0);
-    if (serverSocket == INVALID_SOCKET) {
-        std::cerr << "Socket creation failed." << std::endl;
-        WSACleanup();
-        return;
-    }
+    handle_Client(); // Handle communication with the client
+}
 
-    // Allow the socket to be reused
-    constexpr int option = 1;
-    if (setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&option), sizeof(option)) != 0) {
-        std::cerr << "Failed to set socket options." << std::endl;
-        closesocket(serverSocket);
-        WSACleanup();
-        return;
-    }
-
-    sockaddr_in serverAddress{};
-    // Set up the server address structure
-    serverAddress.sin_family = AF_INET;
-    serverAddress.sin_addr.s_addr = INADDR_ANY;
-    serverAddress.sin_port = htons(PORT);
-
-    // Bind the socket to the server address
-    if (bind(serverSocket, reinterpret_cast<struct sockaddr*>(&serverAddress), sizeof(serverAddress)) < 0) {
-        std::cerr << "Bind failed." << std::endl;
-        closesocket(serverSocket);
-        WSACleanup();
-        return;
-    }
-
-    // Start listening for incoming connections
-    if (listen(serverSocket, SOMAXCONN) < 0) {
-        std::cerr << "Listening failed." << std::endl;
-        closesocket(serverSocket);
-        WSACleanup();
-        return;
-    }
-
-    std::cout << "Server is listening on port " << PORT << std::endl;
-
-    sockaddr_in clientAddress{};
-    int addrlen = sizeof(clientAddress);
-
-    // Accept a client connection
-    const SOCKET clientSocket = accept(serverSocket, reinterpret_cast<struct sockaddr*>(&clientAddress), (socklen_t*)&addrlen);
-    if (clientSocket == INVALID_SOCKET) {
-        std::cerr << "Accept failed." << std::endl;
-        closesocket(serverSocket);
-        WSACleanup();
-        return;
-    }
-
-    char buffer[BUFFER_SIZE] = {0};
-    // Main loop to handle client requests
+void Server::handle_Client() const {
     while (true) {
-        const int bytesRead = recv(clientSocket, buffer, BUFFER_SIZE, 0);
-        if (bytesRead <= 0) {
-            break;
-        }
-        buffer[bytesRead] = '\0';
+        char buffer[1024] = {0};
+        const int valread = read(new_socket, buffer, 1024);
 
-        try {
-            json request = json::parse(buffer);
-            json response = handleRequest(request);
-            std::string responseString = response.dump();
-            // Send the response back to the client
-            send(clientSocket, responseString.c_str(), static_cast<int>(responseString.size()), 0);
-        } catch (const json::parse_error& e) {
-            std::cerr << "JSON parse error: " << e.what() << std::endl;
+        if (valread <= 0) {
+            std::cout << "Client disconnected." << std::endl;
+            break; // Exit loop
         }
+
+        json message = json::parse(std::string(buffer, valread));
+        std::cout << "Received: " << message.dump() << std::endl;
+
+        json response; // Prepare a response message based on the action
+        if (message["action"] == "create_device") {
+            response["response"] = "Device created successfully!";
+        } else if (message["action"] == "get_device_status") {
+            response["response"] = "Device is operational.";
+        } else {
+            response["response"] = "Unknown action.";
+        }
+
+        send(new_socket, response.dump().c_str(), response.dump().size(), 0);
     }
-
-    // Clean up resources on exit
-    closesocket(clientSocket);
-    closesocket(serverSocket);
-    WSACleanup();
-}
-
-int main() {
-    startServer();
-    return 0;
+    close(new_socket); // Close the connection with the client
 }

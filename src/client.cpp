@@ -1,191 +1,128 @@
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <iostream>
-#include <nlohmann/json.hpp>
-#include <fstream>
-#include <vector>
-#include <string>
-
-// Link the ws2_32 library
-#pragma comment(lib, "ws2_32.lib")
+#include <Client.h>
 
 using json = nlohmann::json;
 
-// Server configuration constants
-auto SERVER_IP = "127.0.0.1";
-constexpr int PORT = 54000;
-constexpr int BUFFER_SIZE = 1024;
+Client::Client() : sock(-1), server(), is_connected(false) {
+}
 
-// DeviceClient class handles communication with the server
-class DeviceClient {
-private:
-    SOCKET socket_;
-    bool isConnected_;
-    std::vector<std::string> actionLogs_;
-
-public:
-    // Constructor: Initializes Winsock and sets up the client
-    DeviceClient() : socket_(INVALID_SOCKET), isConnected_(false) {
-        WSADATA wsaData;
-        WSAStartup(MAKEWORD(2, 2), &wsaData);
+void Client::connect_Server(const std::string &server_address, int port) {
+    if (is_connected) {
+        std::cout << "Already connected to the server!" << std::endl;
+        return;
     }
 
-    // Destructor: Cleans up resources when the client is destroyed
-    ~DeviceClient() {
-        shutdownConnection();
-        WSACleanup();
+    sock = socket(AF_INET, SOCK_STREAM, 0); // Create a socket
+    if (sock < 0) {
+        perror("Socket creation failed");
+        exit(EXIT_FAILURE);
     }
 
-    // Displays the main menu for user interaction
-    void displayMainMenu() {
-        int choice;
-        do {
-            std::cout << "\nMain Menu:\n";
-            std::cout << "1. Connect\n2. Send Device Info\n3. Receive Device Info\n";
-            std::cout << "4. Generate Report\n5. Disconnect\n0. Exit\nChoose an option: ";
-            std::cin >> choice;
-
-            // Process user selection
-            switch (choice) {
-                case 1: connectToServer(); break;
-                case 2: sendDeviceInformation(); break;
-                case 3: receiveDeviceInformation(); break;
-                case 4: createReport(); break;
-                case 5: shutdownConnection(); break;
-                case 0: std::cout << "Exiting...\n"; break;
-                default: std::cout << "Invalid choice. Please try again.\n";
-            }
-        } while (choice != 0); // Continue until the user exits
+    server.sin_family = AF_INET;
+    server.sin_port = htons(port);
+    if (inet_pton(AF_INET, server_address.c_str(), &server.sin_addr) <= 0) {
+        perror("Invalid address");
+        exit(EXIT_FAILURE);
     }
 
-private:
-    // Connects to the server
-    void connectToServer() {
-        socket_ = socket(AF_INET, SOCK_STREAM, 0);
-        sockaddr_in serverAddress = {};
-        serverAddress.sin_family = AF_INET;
-        serverAddress.sin_port = htons(PORT);
-        inet_pton(AF_INET, SERVER_IP, &serverAddress.sin_addr);
+    if (connect(sock, reinterpret_cast<struct sockaddr *>(&server), sizeof(server)) < 0) { // Connect to server
+        perror("Connection failed");
+        exit(EXIT_FAILURE);
+    }
+// Update connection status
+    is_connected = true;
+    std::cout << "Connected to server!" << std::endl;
+}
 
-        // Attempt to connect to the server
-        if (connect(socket_, reinterpret_cast<struct sockaddr*>(&serverAddress), sizeof(serverAddress)) < 0) {
-            logAction("Connection failed.");
-            return;
+void Client::close_Connection() {
+    if (is_connected) {
+        close(sock);
+        is_connected = false;
+        std::cout << "Connection closed!" << std::endl;
+    } else {
+        std::cout << "No connection to close!" << std::endl;
+    }
+}
+
+void Client::send_Data(const json &data) const {
+    std::string data_str = data.dump();
+    send(sock, data_str.c_str(), data_str.size(), 0);
+}
+
+json Client::receive_Data() const {
+    char buffer[1024] = {0};
+    const int valread = read(sock, buffer, 1024);
+    return json::parse(std::string(buffer, valread));
+}
+
+void Client::show_Menu() {
+    int choice;
+    std::string server_address;
+    int port;
+
+    do {
+        std::cout << "\nMain Menu:\n";
+        std::cout << "1. Connect to Server\n";
+        std::cout << "2. Close Connection\n";
+        std::cout << "3. Send Data Menu\n";
+        std::cout << "4. Exit\n";
+        std::cout << "Choose an option: ";
+        std::cin >> choice;
+
+        switch (choice) {
+            case 1:
+                std::cout << "Enter server IP address: ";
+                std::cin >> server_address;
+                std::cout << "Enter server port: ";
+                std::cin >> port;
+                connect_Server(server_address, port); // Connect to the server
+                break;
+
+            case 2: close_Connection(); break;
+            case 3: show_Send_Data_Menu(); break;
+            case 4:
+                close_Connection(); // Close the connection
+                std::cout << "Exiting..." << std::endl;
+                return;
+
+            default:
+                std::cout << "Invalid choice!" << std::endl;
         }
+    } while (true);
+}
 
-        isConnected_ = true;
-        logAction("Successfully connected to server.");
-    }
+void Client::show_Send_Data_Menu() {
+    int choice;
+    do {
+        std::cout << "\nSend Data Menu:\n";
+        std::cout << "1. Create Device\n";
+        std::cout << "2. Get Device Status\n";
+        std::cout << "3. Back to Main Menu\n";
+        std::cout << "Choose an option: ";
+        std::cin >> choice;
 
-    // Menu for sending device information
-    void sendDeviceInformation() {
-        int choice;
-        do {
-            std::cout << "\nSend Device Information Menu:\n";
-            std::cout << "1. Add Device\n2. Control Device\n3. Back to Main Menu\nChoose an option: ";
-            std::cin >> choice;
-
-            // Process user's choice
-            switch (choice) {
-                case 1: addDevice(); break;
-                case 2: controlDevice(); break;
-                case 3: return;
-                default: std::cout << "Invalid choice. Please try again.\n";
-            }
-        } while (choice != 3);
-    }
-
-    // Initiates adding a device to the server
-    void addDevice() {
-        std::string deviceType, deviceStatus;
-        std::cout << "Enter device type: ";
-        std::cin >> deviceType;
-        std::cout << "Enter device status: ";
-        std::cin >> deviceStatus;
-
-        // Prepare JSON request to add device
-        const json request = { {"action", "add_device"}, {"type", deviceType}, {"status", deviceStatus} };
-        json response;
-        processRequest(request, response);
-        std::cout << response.dump(4) << std::endl;
-        logAction("Added device: " + deviceType + " with status: " + deviceStatus);
-    }
-
-    // Controls an existing device by updating its status
-    void controlDevice() {
-        std::string deviceName, newStatus;
-        std::cout << "Enter device name: ";
-        std::cin >> deviceName;
-        std::cout << "Enter new status: ";
-        std::cin >> newStatus;
-
-        // Prepare JSON request to control device
-        const json request = { {"action", "control_device"}, {"name", deviceName}, {"status", newStatus} };
-        json response;
-        processRequest(request, response);
-        std::cout << response.dump(4) << std::endl;
-        logAction("Controlled device: " + deviceName + " to status: " + newStatus);
-    }
-
-    // Retrieves and displays device information from the server
-    void receiveDeviceInformation() {
-        const json request = { {"action", "get_devices"} };
-        json response;
-        processRequest(request, response);
-        std::cout << "Devices:\n" << response.dump(4) << std::endl;
-        logAction("Received devices information.");
-    }
-
-    // Generates a report of logged actions and saves to a file
-    void createReport() {
-        std::ofstream reportFile("report.json");
-        if (reportFile.is_open()) {
-            const json reportJson = { {"logs", actionLogs_} };
-            reportFile << reportJson.dump(4);
-            reportFile.close(); // Close the file
-            std::cout << "Report generated: report.json\n";
-        } else {
-            std::cerr << "Unable to create report file." << std::endl;
+        switch (choice) {
+            case 1: create_device(); break;
+            case 2: get_device_status(); break;
+            case 3: return; // Back to main menu
+            default:
+                std::cout << "Invalid choice!" << std::endl;
         }
-    }
+    } while (true);
+}
 
-    // Closes the connection to the server
-    void shutdownConnection() {
-        if (isConnected_) {
-            closesocket(socket_);
-            isConnected_ = false;
-            logAction("Disconnected from server.");
-            std::cout << "Connection closed.\n";
-        } else {
-            std::cout << "Already disconnected.\n";
-        }
-    }
+void Client::create_device() {
+    json json_request;
+    json_request["action"] = "create_device";
+    json_request["device_name"] = "Device_1";
+    send_Data(json_request);
+    json response = receive_Data();
+    std::cout << "Server Response: " << response.dump() << std::endl;
+}
 
-    // Sends a JSON request to the server and receives a response
-    void processRequest(const json& request, json& response) {
-        const std::string requestString = request.dump();
-        send(socket_, requestString.c_str(), static_cast<int>(requestString.size()), 0); // Send request to server
-
-        char buffer[BUFFER_SIZE] = {0};
-        const int bytesRead = recv(socket_, buffer, BUFFER_SIZE, 0);
-        if (bytesRead > 0) {
-            buffer[bytesRead] = '\0';
-            response = json::parse(buffer);
-            logAction("Received Response: " + response.dump(4));
-        } else {
-            logAction("Failed to receive response from server.");
-        }
-    }
-
-    // Logs actions performed by the client
-    void logAction(const std::string& action) {
-        actionLogs_.push_back(action);
-    }
-};
-
-
-int main() {
-    DeviceClient deviceClient;
-    deviceClient.displayMainMenu();
-    return 0; // End of the program
+void Client::get_device_status() {
+    json json_request;
+    json_request["action"] = "get_device_status";
+    send_Data(json_request);
+    json response = receive_Data();
+    std::cout << "Server Response: " << response.dump() << std::endl;
 }
